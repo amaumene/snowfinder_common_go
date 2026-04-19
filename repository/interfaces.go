@@ -6,27 +6,16 @@ import (
 	"github.com/amaumene/snowfinder_common/models"
 )
 
-// Reader provides read-only access to the database.
-// This interface is used by the web application to query data.
-type Reader interface {
-	GetResortBySlug(ctx context.Context, slug string) (*models.Resort, error)
-	GetResortByID(ctx context.Context, id string) (*models.Resort, error)
-	// GetSnowiestResorts supports two input modes:
-	//   - weekly mode when endDate == "": startDate must be YYYY-MM-DD and the query covers 7 days
-	//   - seasonal range mode when endDate != "": startDate and endDate must both be MM-DD
-	GetSnowiestResorts(ctx context.Context, startDate, endDate, prefecture string, limit int) ([]models.WeeklyResortStats, error)
-	GetAllResortsWithPeaks(ctx context.Context) ([]models.ResortWithPeaks, error)
-	GetPeakPeriodsForResort(ctx context.Context, resortID string) ([]models.PeakPeriod, error)
-	GetPendingFailedScrapeAttempts(ctx context.Context) ([]models.FailedScrapeAttempt, error)
-}
-
-// Writer provides full read-write access to the database.
-// This interface is used by the scraper to save collected data.
+// Writer provides the write operations used by the scraper.
+// It intentionally does not embed a Reader interface: the scraper holds a
+// concrete *WriterRepository and calls read methods directly. Keeping the
+// interface narrow makes it easier to mock in tests and avoids coupling the
+// write path to the full read surface.
 type Writer interface {
-	Reader
 	SaveResort(ctx context.Context, resort *models.Resort) error
 	SaveSnowDepthReadings(ctx context.Context, readings []models.SnowDepthReading) error
 	SaveDailySnowfall(ctx context.Context, snowfalls []models.DailySnowfall) error
 	SaveFailedScrapeAttempt(ctx context.Context, resortURL, errorMessage string) error
 	MarkFailedAttemptRetried(ctx context.Context, id string) error
+	GetPendingFailedScrapeAttempts(ctx context.Context) ([]models.FailedScrapeAttempt, error)
 }

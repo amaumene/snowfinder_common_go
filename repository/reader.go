@@ -69,9 +69,6 @@ func (r *ReaderRepository) getResort(ctx context.Context, whereClause string, ar
 // GetResortBySlug returns the resort with the given URL slug.
 // Returns sql.ErrNoRows (wrapped) if no matching resort exists.
 func (r *ReaderRepository) GetResortBySlug(ctx context.Context, slug string) (*models.Resort, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
 	// SAFETY: whereClause is hardcoded, not user-supplied
 	resort, err := r.getResort(ctx, "slug = ?", slug)
 	if err != nil {
@@ -83,9 +80,6 @@ func (r *ReaderRepository) GetResortBySlug(ctx context.Context, slug string) (*m
 // GetResortByID returns the resort with the given UUID.
 // Returns sql.ErrNoRows (wrapped) if no matching resort exists.
 func (r *ReaderRepository) GetResortByID(ctx context.Context, id string) (*models.Resort, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
 	// SAFETY: whereClause is hardcoded, not user-supplied
 	resort, err := r.getResort(ctx, "id = ?", id)
 	if err != nil {
@@ -94,53 +88,53 @@ func (r *ReaderRepository) GetResortByID(ctx context.Context, id string) (*model
 	return resort, nil
 }
 
-// GetSnowiestResorts queries snowiest resorts for a date range with optional prefecture filter.
-// If endDate is empty, it defaults to startDate + 6 days (week mode).
-func (r *ReaderRepository) GetSnowiestResorts(ctx context.Context, startDate, endDate, prefecture string, limit int) ([]models.WeeklyResortStats, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
+// GetSnowiestResortsForWeek queries the snowiest resorts for the 7-day window
+// starting at weekStart (inclusive). prefecture is optional; pass "" for all.
+func (r *ReaderRepository) GetSnowiestResortsForWeek(ctx context.Context, weekStart time.Time, prefecture string, limit int) ([]models.WeeklyResortStats, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("limit must be positive: %d", limit)
 	}
 
-	var startDOY, endDOY int
-	var startMonth int
+	startTime := time.Date(2000, weekStart.Month(), weekStart.Day(), 0, 0, 0, 0, time.UTC)
+	startDOY := startTime.YearDay()
+	endDOY := startTime.AddDate(0, 0, 6).YearDay()
+	startMonth := int(startTime.Month())
 
-	if endDate == "" {
-		// Week mode: startDate is "YYYY-MM-DD"
-		startTime, err := time.Parse("2006-01-02", startDate)
-		if err != nil {
-			return nil, fmt.Errorf("parse start date: %w", err)
-		}
-		startTime = time.Date(2000, startTime.Month(), startTime.Day(), 0, 0, 0, 0, time.UTC)
-		startDOY = startTime.YearDay()
-		endTime := startTime.AddDate(0, 0, 6)
-		endDOY = endTime.YearDay()
-		startMonth = int(startTime.Month())
-	} else {
-		// Date range mode: both are "MM-DD"
-		var err error
-		var startTime time.Time
-		startTime, err = time.Parse("01-02", startDate)
-		if err != nil {
-			return nil, fmt.Errorf("parse start date: %w", err)
-		}
-		_, err = time.Parse("01-02", endDate)
-		if err != nil {
-			return nil, fmt.Errorf("parse end date: %w", err)
-		}
-		startDOY, err = mmddToDOY(startDate)
-		if err != nil {
-			return nil, fmt.Errorf("parse start date: %w", err)
-		}
-		endDOY, err = mmddToDOY(endDate)
-		if err != nil {
-			return nil, fmt.Errorf("parse end date: %w", err)
-		}
-		startMonth = int(startTime.Month())
+	return r.querySnowiestResorts(ctx, startDOY, endDOY, startMonth, prefecture, limit)
+}
+
+// GetSnowiestResortsForDateRange queries the snowiest resorts for a seasonal
+// MM-DD range (e.g. "12-15" to "01-15"). Handles cross-year boundaries.
+// prefecture is optional; pass "" for all.
+func (r *ReaderRepository) GetSnowiestResortsForDateRange(ctx context.Context, startMMDD, endMMDD, prefecture string, limit int) ([]models.WeeklyResortStats, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("limit must be positive: %d", limit)
 	}
 
+	startTime, err := time.Parse("01-02", startMMDD)
+	if err != nil {
+		return nil, fmt.Errorf("parse start date: %w", err)
+	}
+	if _, err := time.Parse("01-02", endMMDD); err != nil {
+		return nil, fmt.Errorf("parse end date: %w", err)
+	}
+
+	startDOY, err := mmddToDOY(startMMDD)
+	if err != nil {
+		return nil, fmt.Errorf("parse start date: %w", err)
+	}
+	endDOY, err := mmddToDOY(endMMDD)
+	if err != nil {
+		return nil, fmt.Errorf("parse end date: %w", err)
+	}
+	startMonth := int(startTime.Month())
+
+	return r.querySnowiestResorts(ctx, startDOY, endDOY, startMonth, prefecture, limit)
+}
+
+// querySnowiestResorts is the shared implementation for both GetSnowiestResortsForWeek
+// and GetSnowiestResortsForDateRange.
+func (r *ReaderRepository) querySnowiestResorts(ctx context.Context, startDOY, endDOY, startMonth int, prefecture string, limit int) ([]models.WeeklyResortStats, error) {
 	var dateFilter string
 	groupYearExpr := "CAST(strftime('%Y', substr(date, 1, 19)) AS INTEGER)"
 	if startDOY <= endDOY {
@@ -231,9 +225,6 @@ func scanWeeklyResortStats(rows *sql.Rows) ([]models.WeeklyResortStats, error) {
 // with their associated peak periods pre-loaded. Results are ordered by prefecture,
 // resort name, and peak rank.
 func (r *ReaderRepository) GetAllResortsWithPeaks(ctx context.Context) ([]models.ResortWithPeaks, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
 	// Single JOIN query to fetch resorts and their peaks together
 	query := `
 		SELECT r.id, r.slug, r.name, r.prefecture, r.region,
@@ -256,8 +247,10 @@ func (r *ReaderRepository) GetAllResortsWithPeaks(ctx context.Context) ([]models
 	}
 	defer rows.Close()
 
-	resortMap := make(map[string]*models.ResortWithPeaks)
-	var order []string
+	// Rows are ordered by resort; use a last-seen-id sentinel instead of a map
+	// to avoid a second pass and an allocation for the ordering slice.
+	var results []models.ResortWithPeaks
+	var lastID string
 
 	for rows.Next() {
 		var resort models.Resort
@@ -292,22 +285,17 @@ func (r *ReaderRepository) GetAllResortsWithPeaks(ctx context.Context) ([]models
 		}
 		peak.ResortID = resort.ID
 
-		if _, exists := resortMap[resort.ID]; !exists {
-			resortMap[resort.ID] = &models.ResortWithPeaks{
+		if resort.ID != lastID {
+			results = append(results, models.ResortWithPeaks{
 				Resort: resort,
 				Peaks:  []models.PeakPeriod{},
-			}
-			order = append(order, resort.ID)
+			})
+			lastID = resort.ID
 		}
-		resortMap[resort.ID].Peaks = append(resortMap[resort.ID].Peaks, peak)
+		results[len(results)-1].Peaks = append(results[len(results)-1].Peaks, peak)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate rows: %w", err)
-	}
-
-	results := make([]models.ResortWithPeaks, 0, len(order))
-	for _, id := range order {
-		results = append(results, *resortMap[id])
 	}
 
 	return results, nil
@@ -316,9 +304,6 @@ func (r *ReaderRepository) GetAllResortsWithPeaks(ctx context.Context) ([]models
 // GetPendingFailedScrapeAttempts returns all failed scrape attempts that have not
 // yet been retried, ordered by failure time ascending.
 func (r *ReaderRepository) GetPendingFailedScrapeAttempts(ctx context.Context) ([]models.FailedScrapeAttempt, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
 	query := `
 		SELECT id, resort_url, error_message, failed_at, retried, retried_at
 		FROM failed_scrape_attempts
@@ -350,9 +335,6 @@ func (r *ReaderRepository) GetPendingFailedScrapeAttempts(ctx context.Context) (
 // GetPeakPeriodsForResort returns all peak periods for the given resort,
 // ordered by peak rank ascending.
 func (r *ReaderRepository) GetPeakPeriodsForResort(ctx context.Context, resortID string) ([]models.PeakPeriod, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
 	query := `
 		SELECT id, resort_id, peak_rank, start_doy, end_doy, center_doy,
 			   avg_daily_snowfall, total_period_snowfall, prominence_score,

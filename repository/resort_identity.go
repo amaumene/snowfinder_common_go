@@ -15,6 +15,10 @@ type resortIdentityRecord struct {
 	Region     string
 }
 
+// sameResortIdentity reports whether two records refer to the same resort.
+// Name is intentionally excluded from the comparison: resorts can be renamed
+// over time, but their prefecture/region identity is stable and uniquely
+// identifies a physical location.
 func sameResortIdentity(a, b *resortIdentityRecord) bool {
 	if a == nil || b == nil {
 		return false
@@ -82,6 +86,12 @@ func resolvePersistedResortRecordOrError(resort *models.Resort, existingBySlug, 
 	record := resolvePersistedResortRecord(resort, existingBySlug, existingByScopedSlug)
 	if record != nil {
 		return record, nil
+	}
+
+	// record == nil only when both existingBySlug and existingByScopedSlug are
+	// non-nil (slug collision). Guard against an unexpected nil to avoid a panic.
+	if existingBySlug == nil {
+		return nil, fmt.Errorf("resolvePersistedResortRecordOrError called with nil existingBySlug")
 	}
 
 	return nil, fmt.Errorf(

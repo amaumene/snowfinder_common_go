@@ -31,20 +31,28 @@ type Prediction struct {
 }
 
 // DailyForecast holds one day of forecast data.
+//
+// Temperature fields are pointers because the Python predictor emits JSON
+// `null` for days where the underlying hourly data is missing (e.g. fog of
+// war days past the GSM horizon, or a forecast-less new resort). Decoding
+// `null` into a plain `float64` silently produced `0.0 °C` — visually
+// indistinguishable from a real freezing-point day — and broke the "precision
+// earns trust" contract. Consumers must nil-check or use the `deref`/`with`
+// template helpers.
 type DailyForecast struct {
 	// Date is formatted as "YYYY-MM-DD".
-	Date              string  `json:"date"`
-	SnowfallCM        float64 `json:"snowfall_cm"`
-	TempMax           float64 `json:"temp_max"`
-	TempMin           float64 `json:"temp_min"`
-	PrecipitationMM   float64 `json:"precipitation_mm"`
-	RainMM            float64 `json:"rain_mm"`
-	WindSpeedMaxKmh   float64 `json:"wind_speed_max_kmh"`
-	WindGustsMaxKmh   float64 `json:"wind_gusts_max_kmh"`
-	ApparentTempMin   float64 `json:"apparent_temp_min"`
-	WeatherCode       int     `json:"weather_code"`
-	VsHistoricalAvgCM float64 `json:"vs_historical_avg_cm"`
-	HistoricalAvgCM   float64 `json:"historical_avg_cm"`
+	Date              string   `json:"date"`
+	SnowfallCM        float64  `json:"snowfall_cm"`
+	TempMax           *float64 `json:"temp_max"`
+	TempMin           *float64 `json:"temp_min"`
+	PrecipitationMM   float64  `json:"precipitation_mm"`
+	RainMM            float64  `json:"rain_mm"`
+	WindSpeedMaxKmh   float64  `json:"wind_speed_max_kmh"`
+	WindGustsMaxKmh   float64  `json:"wind_gusts_max_kmh"`
+	ApparentTempMin   *float64 `json:"apparent_temp_min"`
+	WeatherCode       int      `json:"weather_code"`
+	VsHistoricalAvgCM float64  `json:"vs_historical_avg_cm"`
+	HistoricalAvgCM   float64  `json:"historical_avg_cm"`
 	// Derived fields from JMA MSM/GSM snow model
 	SnowmeltMM           float64     `json:"snowmelt_mm"`
 	PrecipType           *string     `json:"precip_type"`
@@ -53,11 +61,11 @@ type DailyForecast struct {
 	PowderProbability    *PowderProb `json:"powder_probability"`
 	SnowfallRangeLow     float64     `json:"snowfall_range_low"`
 	SnowfallRangeHigh    float64     `json:"snowfall_range_high"`
-	HistoricalPercentile int         `json:"historical_percentile"`
+	HistoricalPercentile float64     `json:"historical_percentile"`
 	WindDirectionDeg     *int        `json:"wind_direction_deg"`
 	Sunrise              *string     `json:"sunrise"`
 	Sunset               *string     `json:"sunset"`
-	PrecipProbabilityPct *float64    `json:"precip_probability_pct,omitempty"`
+	PrecipProbabilityPct *float64    `json:"precip_probability_pct"`
 }
 
 // PowderProb holds ensemble-based snowfall probability thresholds.

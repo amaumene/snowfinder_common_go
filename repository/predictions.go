@@ -11,6 +11,12 @@ import (
 	"github.com/amaumene/snowfinder_common/models"
 )
 
+// globalParamsID is the fixed row ID for the single global-params record.
+// The table is designed to hold exactly one row; there is no LoadPredictions
+// method on this repository because predictions are read by the web service
+// from its own in-process store, not from this repo.
+const globalParamsID = 1
+
 // PredictionRepository provides access to prediction-related tables.
 type PredictionRepository struct {
 	db *sql.DB
@@ -25,9 +31,6 @@ func NewPredictionRepository(db *sql.DB) *PredictionRepository {
 
 // LoadPredictionConfig loads per-resort config from prediction_config table.
 func (r *PredictionRepository) LoadPredictionConfig(ctx context.Context) (map[string]models.PredictorResortConfig, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
 	rows, err := r.db.QueryContext(ctx, "SELECT resort_id, config_data FROM prediction_config")
 	if err != nil {
 		return nil, fmt.Errorf("query prediction_config: %w", err)
@@ -55,13 +58,12 @@ func (r *PredictionRepository) LoadPredictionConfig(ctx context.Context) (map[st
 }
 
 // LoadGlobalParams loads global predictor parameters.
+// Returns a zero-value GlobalParams (not an error) when no row exists.
 func (r *PredictionRepository) LoadGlobalParams(ctx context.Context) (models.GlobalParams, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
 	var paramsData []byte
 	err := r.db.QueryRowContext(ctx,
-		"SELECT params_data FROM prediction_global_params WHERE id = 1",
+		"SELECT params_data FROM prediction_global_params WHERE id = ?",
+		globalParamsID,
 	).Scan(&paramsData)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -78,9 +80,6 @@ func (r *PredictionRepository) LoadGlobalParams(ctx context.Context) (models.Glo
 
 // SavePredictions upserts all predictions using INSERT ON CONFLICT.
 func (r *PredictionRepository) SavePredictions(ctx context.Context, predictions *models.PredictionData) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
 	if predictions == nil {
 		return errors.New("nil prediction data")
 	}

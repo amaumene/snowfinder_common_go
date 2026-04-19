@@ -2,49 +2,12 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"math"
 	"testing"
 	"time"
 
 	"github.com/amaumene/snowfinder_common/models"
-	_ "modernc.org/sqlite"
 )
-
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open test db: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	_, err = db.Exec(`CREATE TABLE predictions (
-		resort_id TEXT PRIMARY KEY,
-		prediction_data BLOB NOT NULL,
-		generated_at DATETIME NOT NULL
-	)`)
-	if err != nil {
-		t.Fatalf("create predictions table: %v", err)
-	}
-
-	return db
-}
-
-func newTestDBWithPredictionsSchema(t *testing.T, schema string) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open test db: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("create predictions table: %v", err)
-	}
-
-	return db
-}
 
 func TestPredictionRepositorySavePredictions_CommitsTransaction(t *testing.T) {
 	t.Parallel()
@@ -164,6 +127,25 @@ func TestPredictionRepositorySavePredictions_EmptyResorts(t *testing.T) {
 	}
 }
 
+func TestPredictionRepositorySavePredictions_InvalidGeneratedAt(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	repo := NewPredictionRepository(db)
+
+	predictions := &models.PredictionData{
+		GeneratedAt: "not-a-date",
+		Resorts: map[string]models.Prediction{
+			"resort-1": {Name: "One"},
+		},
+	}
+
+	err := repo.SavePredictions(context.Background(), predictions)
+	if err == nil {
+		t.Fatal("expected error for invalid GeneratedAt")
+	}
+}
+
 func TestPredictionRepositorySavePredictions_RollsBackOnMidTransactionFailure(t *testing.T) {
 	t.Parallel()
 
@@ -193,5 +175,21 @@ func TestPredictionRepositorySavePredictions_RollsBackOnMidTransactionFailure(t 
 	}
 	if count != 0 {
 		t.Fatalf("saved %d predictions after rollback, want 0", count)
+	}
+}
+
+func TestPredictionRepositoryLoadGlobalParams_MissingRowReturnsZeroValue(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	repo := NewPredictionRepository(db)
+
+	params, err := repo.LoadGlobalParams(context.Background())
+	if err != nil {
+		t.Fatalf("LoadGlobalParams() error = %v", err)
+	}
+	// Zero-value GlobalParams — no numeric fields set
+	if params.BlendW0 != 0 || params.BlendDecay != 0 || params.BlendWeights != nil {
+		t.Fatalf("LoadGlobalParams() = %+v, want zero value", params)
 	}
 }

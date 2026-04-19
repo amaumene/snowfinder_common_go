@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
+	"strings"
 
 	"github.com/amaumene/snowfinder_common/models"
 	"github.com/google/uuid"
@@ -33,9 +33,12 @@ func (r *WriterRepository) SaveResort(ctx context.Context, resort *models.Resort
 	if resort == nil {
 		return errors.New("nil resort")
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	if strings.TrimSpace(resort.Slug) == "" {
+		return errors.New("resort slug is required")
+	}
+	if strings.TrimSpace(resort.Name) == "" {
+		return errors.New("resort name is required")
+	}
 
 	resolvedID := resort.ID
 	if resolvedID == "" {
@@ -52,6 +55,8 @@ func (r *WriterRepository) SaveResort(ctx context.Context, resort *models.Resort
 	}
 	resolvedSlug := persistedRecord.Slug
 
+	// Use RETURNING id to atomically get the persisted id, avoiding the
+	// select-then-upsert race that the previous two-phase flow had.
 	query := `
 		INSERT INTO resorts (
 			id, slug, name, prefecture, region,
@@ -69,19 +74,22 @@ func (r *WriterRepository) SaveResort(ctx context.Context, resort *models.Resort
 			longest_course_km = EXCLUDED.longest_course_km,
 			steepest_course_deg = EXCLUDED.steepest_course_deg,
 			last_updated = datetime('now')
+		RETURNING id
 	`
 
-	_, err = r.ReaderRepository.db.ExecContext(ctx, query,
+	var persistedID string
+	err = r.db.QueryRowContext(ctx, query,
 		resolvedID, resolvedSlug, resort.Name, resort.Prefecture, resort.Region,
 		resort.TopElevationM, resort.BaseElevationM, resort.VerticalM,
 		resort.NumCourses, resort.LongestCourseKM, resort.SteepestCourseDeg,
-	)
+	).Scan(&persistedID)
 
 	if err != nil {
 		return fmt.Errorf("save resort: %w", err)
 	}
 
-	resort.ID = resolvedID
+	// Side effect: mutate the caller's resort to reflect the persisted ID and slug.
+	resort.ID = persistedID
 	resort.Slug = resolvedSlug
 
 	return nil
@@ -113,7 +121,7 @@ func (r *WriterRepository) getResortIdentityRecordBySlug(ctx context.Context, sl
 	`
 
 	var record resortIdentityRecord
-	err := r.ReaderRepository.db.QueryRowContext(ctx, query, slug).Scan(
+	err := r.db.QueryRowContext(ctx, query, slug).Scan(
 		&record.ID,
 		&record.Slug,
 		&record.Name,
@@ -133,13 +141,13 @@ func (r *WriterRepository) getResortIdentityRecordBySlug(ctx context.Context, sl
 
 // SaveSnowDepthReadings upserts a batch of snow depth readings.
 // Readings are written in chunks of batchChunkSize, each in its own transaction.
+// Partial writes across chunks are safe: the upserts are idempotent, so
+// re-running after a mid-batch failure will complete the remaining chunks
+// without duplicating already-written rows.
 func (r *WriterRepository) SaveSnowDepthReadings(ctx context.Context, readings []models.SnowDepthReading) error {
 	if len(readings) == 0 {
 		return nil
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 
 	query := `
 		INSERT INTO snow_depth_readings (resort_id, date, depth_cm)
@@ -164,14 +172,14 @@ func (r *WriterRepository) SaveSnowDepthReadings(ctx context.Context, readings [
 // saveSnowDepthChunk writes a single chunk of snow depth readings in one transaction.
 // defer tx.Rollback() is scoped to this function, not the enclosing loop.
 func (r *WriterRepository) saveSnowDepthChunk(ctx context.Context, query string, chunk []models.SnowDepthReading) error {
-	tx, err := r.ReaderRepository.db.BeginTx(ctx, nil)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	for _, reading := range chunk {
-		if _, err := tx.ExecContext(ctx, query, reading.ResortID, reading.Date.Format("2006-01-02"), reading.DepthCM); err != nil {
+		if _, err := tx.ExecContext(ctx, query, reading.ResortID, reading.Date.UTC().Format("2006-01-02"), reading.DepthCM); err != nil {
 			return fmt.Errorf("save reading: %w", err)
 		}
 	}
@@ -183,15 +191,12 @@ func (r *WriterRepository) saveSnowDepthChunk(ctx context.Context, query string,
 
 // SaveFailedScrapeAttempt records a new failed scrape attempt for the given URL.
 func (r *WriterRepository) SaveFailedScrapeAttempt(ctx context.Context, resortURL, errorMessage string) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
 	query := `
 		INSERT INTO failed_scrape_attempts (id, resort_url, error_message, failed_at, retried)
 		VALUES (?, ?, ?, datetime('now'), FALSE)
 	`
 
-	if _, err := r.ReaderRepository.db.ExecContext(ctx, query, uuid.New().String(), resortURL, errorMessage); err != nil {
+	if _, err := r.db.ExecContext(ctx, query, uuid.New().String(), resortURL, errorMessage); err != nil {
 		return fmt.Errorf("save failed scrape attempt: %w", err)
 	}
 
@@ -199,18 +204,15 @@ func (r *WriterRepository) SaveFailedScrapeAttempt(ctx context.Context, resortUR
 }
 
 // MarkFailedAttemptRetried marks the failed scrape attempt with the given ID as retried.
-// Returns an error if no row was updated.
+// Returns nil if no row was updated (idempotent: callers may retry the same ID).
 func (r *WriterRepository) MarkFailedAttemptRetried(ctx context.Context, id string) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
 	query := `
 		UPDATE failed_scrape_attempts
 		SET retried = TRUE, retried_at = datetime('now')
 		WHERE id = ?
 	`
 
-	result, err := r.ReaderRepository.db.ExecContext(ctx, query, id)
+	result, err := r.db.ExecContext(ctx, query, id)
 	if err != nil {
 		return fmt.Errorf("mark failed attempt retried: %w", err)
 	}
@@ -218,8 +220,9 @@ func (r *WriterRepository) MarkFailedAttemptRetried(ctx context.Context, id stri
 	if err != nil {
 		return fmt.Errorf("mark failed attempt retried: rows affected: %w", err)
 	}
-	if rowsAffected != 1 {
-		return fmt.Errorf("mark failed attempt retried: affected %d rows, want 1", rowsAffected)
+	// 0 rows affected is treated as success (idempotent).
+	if rowsAffected > 1 {
+		return fmt.Errorf("mark failed attempt retried: affected %d rows, want 0 or 1", rowsAffected)
 	}
 
 	return nil
@@ -227,13 +230,13 @@ func (r *WriterRepository) MarkFailedAttemptRetried(ctx context.Context, id stri
 
 // SaveDailySnowfall upserts a batch of daily snowfall records.
 // Records are written in chunks of batchChunkSize, each in its own transaction.
+// Partial writes across chunks are safe: the upserts are idempotent, so
+// re-running after a mid-batch failure will complete the remaining chunks
+// without duplicating already-written rows.
 func (r *WriterRepository) SaveDailySnowfall(ctx context.Context, snowfalls []models.DailySnowfall) error {
 	if len(snowfalls) == 0 {
 		return nil
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 
 	query := `
 		INSERT INTO daily_snowfall (resort_id, date, snowfall_cm)
@@ -258,14 +261,14 @@ func (r *WriterRepository) SaveDailySnowfall(ctx context.Context, snowfalls []mo
 // saveDailySnowfallChunk writes a single chunk of daily snowfall records in one transaction.
 // defer tx.Rollback() is scoped to this function, not the enclosing loop.
 func (r *WriterRepository) saveDailySnowfallChunk(ctx context.Context, query string, chunk []models.DailySnowfall) error {
-	tx, err := r.ReaderRepository.db.BeginTx(ctx, nil)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	for _, sf := range chunk {
-		if _, err := tx.ExecContext(ctx, query, sf.ResortID, sf.Date.Format("2006-01-02"), sf.SnowfallCM); err != nil {
+		if _, err := tx.ExecContext(ctx, query, sf.ResortID, sf.Date.UTC().Format("2006-01-02"), sf.SnowfallCM); err != nil {
 			return fmt.Errorf("save snowfall: %w", err)
 		}
 	}
